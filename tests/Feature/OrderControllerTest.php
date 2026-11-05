@@ -207,6 +207,48 @@ class OrderControllerTest extends TestCase
             ->assertJsonPath('data.data.0.queue_number', $partial->queue_number);
     }
 
+    public function test_order_filters_can_be_combined_with_search_and_month_without_breaking_legacy_filters(): void
+    {
+        $matchingCustomer = Customer::factory()->create([
+            'account_name' => 'Blue Comet',
+            'username' => 'bluecomet',
+        ]);
+        $matchingOrder = Order::factory()->for($matchingCustomer)->create([
+            'order_date' => '2026-03-12',
+            'work_status' => 'on_progress',
+            'package_price' => '100.00',
+        ]);
+        $matchingOrder->payments()->create([
+            'amount' => '25.00',
+            'payment_date' => '2026-03-12',
+        ]);
+
+        Order::factory()->create([
+            'order_date' => '2026-03-14',
+            'work_status' => 'on_progress',
+            'package_price' => '100.00',
+        ]);
+        Order::factory()->create([
+            'order_date' => '2026-04-14',
+            'work_status' => 'on_progress',
+            'package_price' => '100.00',
+        ]);
+
+        $this->getJson('/api/orders?search=bluecomet&payment_status=dp&work_status=on_progress&month=2026-03')
+            ->assertOk()
+            ->assertJsonCount(1, 'data.data')
+            ->assertJsonPath('data.data.0.queue_number', $matchingOrder->queue_number);
+
+        $this->getJson('/api/orders?filter=dp')
+            ->assertOk()
+            ->assertJsonCount(1, 'data.data')
+            ->assertJsonPath('data.data.0.queue_number', $matchingOrder->queue_number);
+
+        $this->getJson('/api/orders?month=invalid')
+            ->assertUnprocessable()
+            ->assertJsonValidationErrors(['month']);
+    }
+
     public function test_permanent_order_deletion_removes_associated_addons_and_payments(): void
     {
         $order = Order::factory()->create();

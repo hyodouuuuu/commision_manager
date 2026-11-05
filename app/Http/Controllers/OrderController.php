@@ -178,11 +178,15 @@ class OrderController extends Controller
     }
 
     /**
-     * @param  array{search?: string, filter: string, sort: string, per_page: int}  $filters
+     * @param  array{search?: string, filter: string, sort: string, per_page: int, payment_status: string, work_status: string, month: ?string}  $filters
      * @return Builder<Order>
      */
     private function listingQuery(array $filters): Builder
     {
+        $paymentTotal = Payment::query()
+            ->selectRaw('COALESCE(SUM(amount), 0)')
+            ->whereColumn('payments.order_id', 'orders.queue_number');
+
         $query = Order::query()
             ->with(['customer', 'package'])
             ->withSum('payments as total_payment_amount', 'amount')
@@ -194,18 +198,26 @@ class OrderController extends Controller
                                 ->orWhere('username', 'like', "%{$search}%");
                         });
                 });
+            })
+            ->when($filters['payment_status'] !== 'semua', function (Builder $query) use ($filters, $paymentTotal): void {
+                match ($filters['payment_status']) {
+                    'belum_bayar' => $query->where($paymentTotal, '<=', 0),
+                    'dp' => $query->where($paymentTotal, '>', 0)
+                        ->where($paymentTotal, '<', DB::raw('orders.total_price')),
+                    'lunas' => $query->where($paymentTotal, '>', 0)
+                        ->where($paymentTotal, '>=', DB::raw('orders.total_price')),
+                };
+            })
+            ->when($filters['work_status'] !== 'semua', function (Builder $query) use ($filters): void {
+                $query->where('work_status', $filters['work_status']);
+            })
+            ->when($filters['month'] !== null, function (Builder $query) use ($filters): void {
+                [$year, $month] = explode('-', $filters['month']);
+                $query->whereYear('order_date', $year)->whereMonth('order_date', $month);
             });
 
-        $paymentTotal = Payment::query()
-            ->selectRaw('COALESCE(SUM(amount), 0)')
-            ->whereColumn('payments.order_id', 'orders.queue_number');
-
         match ($filters['filter']) {
-            'belum_bayar' => $query->where($paymentTotal, '<=', 0),
-            'dp' => $query->where($paymentTotal, '>', 0)
-                ->whereRaw('(SELECT COALESCE(SUM(amount), 0) FROM payments WHERE payments.order_id = orders.queue_number) < orders.total_price'),
-            'lunas' => $query->where($paymentTotal, '>', 0)
-                ->where($paymentTotal, '>=', DB::raw('orders.total_price')),
+            'belum_bayar', 'dp', 'lunas' => null,
             'belum_dikerjakan' => $query->where('work_status', 'belum_dikerjakan'),
             'on_progress' => $query->where('work_status', 'on_progress'),
             'selesai' => $query->where('work_status', 'selesai'),
@@ -219,22 +231,35 @@ class OrderController extends Controller
     }
 
     /**
-     * @return array{search?: string, filter: string, sort: string, per_page: int}
+     * @return array{search?: string, filter: string, sort: string, per_page: int, payment_status: string, work_status: string, month: ?string}
      */
     private function validateListing(Request $request): array
     {
-        return $request->validate([
+        $validated = $request->validate([
             'search' => ['sometimes', 'string', 'max:255'],
             'filter' => [
                 'sometimes',
                 'in:semua,belum_bayar,dp,lunas,belum_dikerjakan,on_progress,selesai,deadline,dibatalkan',
             ],
+            'payment_status' => ['sometimes', 'in:semua,belum_bayar,dp,lunas'],
+            'work_status' => ['sometimes', 'in:semua,belum_dikerjakan,on_progress,selesai'],
+            'month' => ['sometimes', 'nullable', 'date_format:Y-m'],
             'sort' => ['sometimes', 'in:queue_asc,queue_desc'],
             'per_page' => ['sometimes', 'integer', 'min:1', 'max:100'],
-        ]) + [
-            'filter' => $request->input('filter', 'semua'),
-            'sort' => $request->input('sort', 'queue_asc'),
-            'per_page' => (int) $request->input('per_page', 15),
+        ]);
+
+        $legacyFilter = $validated['filter'] ?? 'semua';
+
+        return [
+            ...$validated,
+            'filter' => $legacyFilter,
+            'payment_status' => $validated['payment_status']
+                ?? (in_array($legacyFilter, ['belum_bayar', 'dp', 'lunas'], true) ? $legacyFilter : 'semua'),
+            'work_status' => $validated['work_status']
+                ?? (in_array($legacyFilter, ['belum_dikerjakan', 'on_progress', 'selesai'], true) ? $legacyFilter : 'semua'),
+            'month' => $validated['month'] ?? null,
+            'sort' => $validated['sort'] ?? 'queue_asc',
+            'per_page' => (int) ($validated['per_page'] ?? 15),
         ];
     }
 
